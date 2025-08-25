@@ -4,15 +4,16 @@ from torch.nn import functional as F
 import sentencepiece as spm
 from datasets import load_dataset
 import os
+import math
 
 # hyperparameters
 
-batch_size = 16
+batch_size = 32
 block_size = 384
 max_iters = 12000
 eval_interval = 500
 eval_iters = 100
-learning_rate = 3e-4
+learning_rate = 6e-4
 n_embed = 512
 n_head = 8
 n_layer = 8
@@ -154,7 +155,7 @@ class Block(nn.Module):
         x = x + self.ffwd(self.ln2(x))
         return x
 
-class BigramLanguageModel(nn.Module):
+class TransformerLanguageModel(nn.Module):  # renamed
     def __init__(self):
         super().__init__()
         self.token_embedding_table = nn.Embedding(vocab_size, n_embed)
@@ -169,6 +170,7 @@ class BigramLanguageModel(nn.Module):
         pos_emb = self.position_embedding_table(torch.arange(T, device=device))
         x = tok_emb + pos_emb
         x = self.blocks(x)
+        x = self.ln_f(x)
         logits = self.lm_head(x)
         if targets is None:
             loss = None
@@ -179,25 +181,54 @@ class BigramLanguageModel(nn.Module):
             loss = F.cross_entropy(logits, targets)
         return logits, loss
     
-    def generate(self, idx, max_new_tokens):
+    def generate(self, idx, max_new_tokens, top_p=0.9):
         for _ in range(max_new_tokens):
             idx_cond = idx[:, -block_size:]
             logits, _ = self(idx_cond)
             logits = logits[:, -1, :]
             probs = F.softmax(logits, dim=-1)
-            idx_next = torch.multinomial(probs, num_samples=1)
-            idx = torch.cat((idx, idx_next), dim=1)
+
+            sorted_probs, sorted_indices = torch.sort(probs, descending=True, dim=-1)
+            cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
+            
+            mask = cumulative_probs > top_p
+            mask[:, 0] = 0
+            sorted_probs[mask] = 0.0
+            sorted_probs = sorted_probs / sorted_probs.sum(dim=-1, keepdim=True)
+
+            next_token = torch.multinomial(sorted_probs, num_samples=1)
+            next_token = sorted_indices.gather(-1, next_token)
+            idx = torch.cat((idx, next_token), dim=1)
         return idx
 
-model = BigramLanguageModel().to(device)
-optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
+model = TransformerLanguageModel().to(device)
+
+# Optimizer + scheduler
+optimizer = torch.optim.AdamW(
+    model.parameters(),
+    lr=learning_rate,
+    betas=(0.9, 0.95),
+    eps=1e-8,
+    weight_decay=0.1
+)
+
+warmup_steps = int(0.05 * max_iters)
+def lr_lambda(step):
+    if step < warmup_steps:
+        return float(step) / float(max(1, warmup_steps))
+    progress = (step - warmup_steps) / float(max(1, max_iters - warmup_steps))
+    return 0.5 * (1.0 + math.cos(math.pi * progress))
+
+scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
 for iter in range(max_iters):
     xb, yb = get_batch("train")
     logits, loss = model(xb, yb)
-    optimizer.zero_grad()
+    optimizer.zero_grad(set_to_none=True)
     loss.backward()
+    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
     optimizer.step()
+    scheduler.step()
     
     if iter % eval_interval == 0:
         losses = estimate_loss()
@@ -208,7 +239,7 @@ input_ids = torch.tensor([encode(prompt)], dtype=torch.long).to(device)
 
 model.eval()
 with torch.no_grad():
-    generated_ids = model.generate(input_ids, max_new_tokens=200)
+    generated_ids = model.generate(input_ids, max_new_tokens=200, top_p=0.9)
 
 generated_text = decode(generated_ids[0].tolist())
 print("\nGenerated text:\n")
