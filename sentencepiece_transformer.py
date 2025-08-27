@@ -5,6 +5,7 @@ import sentencepiece as spm
 from datasets import load_dataset
 import os
 import math
+import matplotlib.pyplot as plt
 
 # hyperparameters
 
@@ -20,6 +21,8 @@ n_layer = 8
 dropout = 0.2
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
+#################################################################
+
 torch.manual_seed(1337)
 
 dataset = load_dataset("wikitext", "wikitext-103-v1", split="train")
@@ -28,6 +31,7 @@ input_file = "wiki_train.txt"
 if not os.path.exists(input_file):
     with open(input_file, "w", encoding="utf-8") as f:
         f.write("\n".join(dataset["text"]))
+
 
 model_prefix = "wiki_bpe"
 vocab_size = 5000
@@ -52,6 +56,7 @@ decode = lambda ids: sp.decode(ids)
 vocab_size = sp.get_piece_size()
 print(f"Vocabulary size: {vocab_size}")
 
+# data encoding
 encoded_tensor_file = "wiki_train_tensor.pt"
 progress_interval = 10000
 
@@ -70,6 +75,7 @@ else:
     data = torch.load(encoded_tensor_file)
     print("Dataset loaded.")
 
+#################################################################
 n = int(0.9 * len(data))
 train_data = data[:n]
 val_data = data[n:]
@@ -95,6 +101,7 @@ def estimate_loss():
     model.train()
     return out
 
+# model
 class Head(nn.Module):
     def __init__(self, head_size):
         super().__init__()
@@ -155,7 +162,7 @@ class Block(nn.Module):
         x = x + self.ffwd(self.ln2(x))
         return x
 
-class TransformerLanguageModel(nn.Module):  # renamed
+class TransformerLanguageModel(nn.Module):
     def __init__(self):
         super().__init__()
         self.token_embedding_table = nn.Embedding(vocab_size, n_embed)
@@ -203,7 +210,7 @@ class TransformerLanguageModel(nn.Module):  # renamed
 
 model = TransformerLanguageModel().to(device)
 
-# Optimizer + scheduler
+#################################################################
 optimizer = torch.optim.AdamW(
     model.parameters(),
     lr=learning_rate,
@@ -221,6 +228,9 @@ def lr_lambda(step):
 
 scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
+train_losses = []
+val_losses = []
+
 for iter in range(max_iters):
     xb, yb = get_batch("train")
     logits, loss = model(xb, yb)
@@ -232,9 +242,28 @@ for iter in range(max_iters):
     
     if iter % eval_interval == 0:
         losses = estimate_loss()
+        train_losses.append(losses['train'])
+        val_losses.append(losses['val'])
         print(f"Step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
 
-prompt = "Artificial intelligence is"
+#################################################################
+torch.save(model.state_dict(), "transformer_model.pt")
+print("Model saved as transformer_model.pt")
+
+plt.figure(figsize=(8,6))
+plt.plot(range(0, max_iters, eval_interval), train_losses, label="Train Loss")
+plt.plot(range(0, max_iters, eval_interval), val_losses, label="Validation Loss")
+plt.xlabel("Iteration")
+plt.ylabel("Loss")
+plt.title("Training and Validation Loss Curve")
+plt.legend()
+plt.grid(True)
+plt.savefig("loss_curve.png")
+plt.show()
+print("Loss curve saved as loss_curve.png")
+
+# generation
+prompt = "The Roman Empire was known for"
 input_ids = torch.tensor([encode(prompt)], dtype=torch.long).to(device)
 
 model.eval()
