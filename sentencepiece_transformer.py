@@ -34,7 +34,7 @@ if not os.path.exists(input_file):
 
 
 model_prefix = "wiki_bpe"
-vocab_size = 5000
+vocab_size = 10000
 
 if not os.path.exists(f"{model_prefix}.model"):
     spm.SentencePieceTrainer.Train(
